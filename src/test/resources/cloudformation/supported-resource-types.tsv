@@ -57,6 +57,7 @@ AWS::Config::ConfigRule	ConfigCfnProvisioner
 AWS::DynamoDB::GlobalTable	DynamoDbCfnProvisioner
 AWS::DynamoDB::Table	DynamoDbCfnProvisioner
 AWS::EC2::EIP	Ec2NetworkCfnProvisioner
+AWS::EC2::EgressOnlyInternetGateway	Ec2NetworkCfnProvisioner
 AWS::EC2::FlowLog	Ec2FlowLogCfnProvisioner
 AWS::EC2::Instance	Ec2InstanceCfnProvisioner
 AWS::EC2::InternetGateway	Ec2NetworkCfnProvisioner

@@ -5288,4 +5288,128 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    @Test
+    @Order(329)
+    void egressOnlyInternetGateway_lifecycleAndWireShape() {
+        String createdVpcId = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.220.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        String eigwId = given()
+            .formParam("Action", "CreateEgressOnlyInternetGateway")
+            .formParam("VpcId", createdVpcId)
+            .formParam("ClientToken", "token-eigw-test-1")
+            .formParam("TagSpecification.1.ResourceType", "egress-only-internet-gateway")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "my-test-eigw")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateEgressOnlyInternetGatewayResponse.clientToken", equalTo("token-eigw-test-1"))
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.egressOnlyInternetGatewayId", startsWith("eigw-"))
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.attachmentSet.item[0].vpcId", equalTo(createdVpcId))
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.attachmentSet.item[0].state", equalTo("attached"))
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.tagSet.item[0].key", equalTo("Name"))
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.tagSet.item[0].value", equalTo("my-test-eigw"))
+            .extract().path("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.egressOnlyInternetGatewayId");
+
+        // Idempotent retry with same clientToken returns same eigwId
+        given()
+            .formParam("Action", "CreateEgressOnlyInternetGateway")
+            .formParam("VpcId", createdVpcId)
+            .formParam("ClientToken", "token-eigw-test-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateEgressOnlyInternetGatewayResponse.egressOnlyInternetGateway.egressOnlyInternetGatewayId", equalTo(eigwId));
+
+        // Describe by ID
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("EgressOnlyInternetGatewayId.1", eigwId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.find { it.egressOnlyInternetGatewayId == '" + eigwId + "' }.attachmentSet.item[0].vpcId", equalTo(createdVpcId))
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.find { it.egressOnlyInternetGatewayId == '" + eigwId + "' }.tagSet.item[0].key", equalTo("Name"));
+
+        // Describe with filter
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("Filter.1.Name", "attachment.vpc-id")
+            .formParam("Filter.1.Value.1", createdVpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet.item.find { it.egressOnlyInternetGatewayId == '" + eigwId + "' }.egressOnlyInternetGatewayId", equalTo(eigwId));
+
+        // Describe non-existent ID returns empty set (not error)
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("EgressOnlyInternetGatewayId.1", "eigw-00000000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet", emptyOrNullString());
+
+        // Delete
+        given()
+            .formParam("Action", "DeleteEgressOnlyInternetGateway")
+            .formParam("EgressOnlyInternetGatewayId", eigwId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteEgressOnlyInternetGatewayResponse.returnCode", equalTo("true"));
+
+        // Verify gateway no longer described
+        given()
+            .formParam("Action", "DescribeEgressOnlyInternetGateways")
+            .formParam("EgressOnlyInternetGatewayId.1", eigwId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeEgressOnlyInternetGatewaysResponse.egressOnlyInternetGatewaySet", emptyOrNullString());
+
+        // Delete again returns 400 InvalidGatewayID.NotFound
+        given()
+            .formParam("Action", "DeleteEgressOnlyInternetGateway")
+            .formParam("EgressOnlyInternetGatewayId", eigwId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidGatewayID.NotFound"));
+
+        // Clean up VPC
+        given()
+            .formParam("Action", "DeleteVpc")
+            .formParam("VpcId", createdVpcId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }

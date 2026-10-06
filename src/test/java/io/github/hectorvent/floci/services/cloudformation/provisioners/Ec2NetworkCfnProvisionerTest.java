@@ -8,7 +8,9 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -50,6 +52,7 @@ class Ec2NetworkCfnProvisionerTest {
     private static final String SUBNET_ID = "subnet-0123456789abcdef0";
     private static final String RTB_ID = "rtb-0123456789abcdef0";
     private static final String IGW_ID = "igw-0123456789abcdef0";
+    private static final String EIGW_ID = "eigw-0123456789abcdef0";
     private static final String NAT_ID = "nat-0123456789abcdef0";
     private static final String ASSOC_ID = "rtbassoc-0123456789abcdef0";
     private static final String ALLOC_ID = "eipalloc-0123456789abcdef0";
@@ -127,6 +130,66 @@ class Ec2NetworkCfnProvisionerTest {
 
         assertEquals(IGW_ID, r.getPhysicalId());
         assertEquals(Set.of("InternetGatewayId"), r.getAttributes().keySet());
+    }
+
+    private static EgressOnlyInternetGateway eigw(String id, String vpcId) {
+        EgressOnlyInternetGateway e = new EgressOnlyInternetGateway();
+        e.setEgressOnlyInternetGatewayId(id);
+        e.getAttachments().add(new InternetGatewayAttachment(vpcId, "attached"));
+        return e;
+    }
+
+    @Test
+    void egressOnlyInternetGatewaySetsItsIdAttribute() {
+        when(ec2.createEgressOnlyInternetGateway(REGION, VPC_ID, null, List.of())).thenReturn(eigw(EIGW_ID, VPC_ID));
+        StackResource r = resource("AWS::EC2::EgressOnlyInternetGateway", "Eigw");
+
+        provisioner.provision(r, mapper.createObjectNode().put("VpcId", VPC_ID), ctx());
+
+        assertEquals(EIGW_ID, r.getPhysicalId());
+        assertEquals(Set.of("Id"), r.getAttributes().keySet());
+        assertEquals(EIGW_ID, r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void egressOnlyInternetGatewayRequiresVpcId() {
+        StackResource r = resource("AWS::EC2::EgressOnlyInternetGateway", "Eigw");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode(), ctx()));
+    }
+
+    @Test
+    void egressOnlyInternetGatewayInTheSameVpcIsKept() {
+        when(ec2.describeEgressOnlyInternetGateways(REGION, List.of(EIGW_ID), Map.of()))
+                .thenReturn(List.of(eigw(EIGW_ID, VPC_ID)));
+        StackResource r = prior("AWS::EC2::EgressOnlyInternetGateway", "Eigw", EIGW_ID, Map.of("Id", EIGW_ID));
+
+        provisioner.provision(r, mapper.createObjectNode().put("VpcId", VPC_ID), ctx(EIGW_ID));
+
+        verify(ec2, never()).createEgressOnlyInternetGateway(any(), any(), any(), any());
+        assertTrue(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void egressOnlyInternetGatewayMovedToAnotherVpcIsReplaced() {
+        when(ec2.describeEgressOnlyInternetGateways(REGION, List.of(EIGW_ID), Map.of()))
+                .thenReturn(List.of(eigw(EIGW_ID, VPC_ID)));
+        when(ec2.createEgressOnlyInternetGateway(REGION, "vpc-other", null, List.of()))
+                .thenReturn(eigw("eigw-replacement", "vpc-other"));
+        StackResource r = prior("AWS::EC2::EgressOnlyInternetGateway", "Eigw", EIGW_ID, Map.of("Id", EIGW_ID));
+
+        provisioner.provision(r, mapper.createObjectNode().put("VpcId", "vpc-other"), ctx(EIGW_ID));
+
+        assertEquals("eigw-replacement", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(EIGW_ID, provisioner.updateCleanupPhysicalId(r));
+        provisioner.completeUpdate(r);
+        verify(ec2).deleteEgressOnlyInternetGateway(REGION, EIGW_ID);
+    }
+
+    @Test
+    void deleteEgressOnlyInternetGatewayCallsService() {
+        provisioner.delete("AWS::EC2::EgressOnlyInternetGateway", EIGW_ID, REGION);
+        verify(ec2).deleteEgressOnlyInternetGateway(REGION, EIGW_ID);
     }
 
     @Test

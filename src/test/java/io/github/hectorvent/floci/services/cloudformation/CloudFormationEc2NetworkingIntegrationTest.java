@@ -214,6 +214,58 @@ class CloudFormationEc2NetworkingIntegrationTest {
         ec2("DeleteVpc", Map.of("VpcId", vpcId));
     }
 
+    @Test
+    void egressOnlyInternetGatewayLifecycleInNetworkingStack() throws Exception {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.42.0.0/16")), "<vpcId>", "</vpcId>");
+        String stackName = "eigw-cfn-it";
+        String tpl = """
+        {
+          "Resources": {
+            "Eigw": {
+              "Type": "AWS::EC2::EgressOnlyInternetGateway",
+              "Properties": {"VpcId": "%1$s"}
+            },
+            "Rt": {
+              "Type": "AWS::EC2::RouteTable",
+              "Properties": {"VpcId": "%1$s"}
+            },
+            "Ipv6Route": {
+              "Type": "AWS::EC2::Route",
+              "DependsOn": "Eigw",
+              "Properties": {
+                "RouteTableId": {"Ref": "Rt"},
+                "DestinationIpv6CidrBlock": "::/0",
+                "EgressOnlyInternetGatewayId": {"Ref": "Eigw"}
+              }
+            }
+          },
+          "Outputs": {
+            "EigwRef": {"Value": {"Ref": "Eigw"}},
+            "EigwId": {"Value": {"Fn::GetAtt": ["Eigw", "Id"]}},
+            "RtId": {"Value": {"Ref": "Rt"}}
+          }
+        }
+        """.formatted(vpcId);
+
+        cloudFormation(stackName, "CreateStack", tpl);
+        String stacks = describeStacks(stackName, "CREATE_COMPLETE");
+        Map<String, String> out = XmlParser.extractPairs(stacks, "Outputs", "OutputKey", "OutputValue");
+        String eigwId = out.get("EigwRef");
+        assertTrue(eigwId.startsWith("eigw-"), eigwId);
+        assertEquals(eigwId, out.get("EigwId"), "Fn::GetAtt Id must equal Ref");
+
+        String described = ec2("DescribeEgressOnlyInternetGateways", Map.of("EgressOnlyInternetGatewayId.1", eigwId));
+        assertTrue(described.contains("<egressOnlyInternetGatewayId>" + eigwId + "</egressOnlyInternetGatewayId>"));
+        assertTrue(described.contains("<vpcId>" + vpcId + "</vpcId>"));
+
+        cloudFormation(stackName, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        String afterDelete = ec2("DescribeEgressOnlyInternetGateways", Map.of("EgressOnlyInternetGatewayId.1", eigwId));
+        assertFalse(afterDelete.contains("<egressOnlyInternetGatewayId>" + eigwId + "</egressOnlyInternetGatewayId>"));
+
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
     private static String between(String haystack, String open, String close) {
         int start = haystack.indexOf(open);
         int end = haystack.indexOf(close, start);
