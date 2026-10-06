@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
 import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -4967,5 +4968,79 @@ class Ec2ServiceTest {
 
         assertEquals(1, service.allocateHosts("us-east-1", "us-east-1c", "m5.large", null, 1,
                 null, null, null, null, null).size());
+    }
+
+    @Test
+    void createAndDescribeEgressOnlyInternetGateway() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Vpc vpc = service.createVpc(region, "10.0.0.0/16", false);
+        Tag tag = new Tag("Environment", "Test");
+        EgressOnlyInternetGateway eigw = service.createEgressOnlyInternetGateway(
+                region, vpc.getVpcId(), null, List.of(tag));
+
+        assertNotNull(eigw);
+        assertTrue(eigw.getEgressOnlyInternetGatewayId().startsWith("eigw-"));
+        assertEquals(1, eigw.getAttachments().size());
+        assertEquals(vpc.getVpcId(), eigw.getAttachments().getFirst().getVpcId());
+        assertEquals("attached", eigw.getAttachments().getFirst().getState());
+
+        List<EgressOnlyInternetGateway> described = service.describeEgressOnlyInternetGateways(
+                region, List.of(eigw.getEgressOnlyInternetGatewayId()), Map.of());
+        assertEquals(1, described.size());
+        assertEquals(eigw.getEgressOnlyInternetGatewayId(), described.getFirst().getEgressOnlyInternetGatewayId());
+
+        // Idempotency token
+        EgressOnlyInternetGateway replayed = service.createEgressOnlyInternetGateway(
+                region, vpc.getVpcId(), "token-123", List.of());
+        EgressOnlyInternetGateway secondReplay = service.createEgressOnlyInternetGateway(
+                region, vpc.getVpcId(), "token-123", List.of());
+        assertEquals(replayed.getEgressOnlyInternetGatewayId(), secondReplay.getEgressOnlyInternetGatewayId());
+
+        // Filter by attachment.vpc-id
+        List<EgressOnlyInternetGateway> filtered = service.describeEgressOnlyInternetGateways(
+                region, List.of(), Map.of("attachment.vpc-id", List.of(vpc.getVpcId())));
+        assertEquals(2, filtered.size());
+
+        // Filter by attachment.state
+        List<EgressOnlyInternetGateway> stateFiltered = service.describeEgressOnlyInternetGateways(
+                region, List.of(), Map.of("attachment.state", List.of("attached")));
+        assertEquals(2, stateFiltered.size());
+
+        // Filter by tag
+        List<EgressOnlyInternetGateway> tagFiltered = service.describeEgressOnlyInternetGateways(
+                region, List.of(), Map.of("tag:Environment", List.of("Test")));
+        assertEquals(1, tagFiltered.size());
+        assertEquals(eigw.getEgressOnlyInternetGatewayId(), tagFiltered.getFirst().getEgressOnlyInternetGatewayId());
+
+        // Cannot delete VPC while EIGW attached
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteVpc(region, vpc.getVpcId())).getErrorCode());
+
+        // Delete EIGWs
+        service.deleteEgressOnlyInternetGateway(region, eigw.getEgressOnlyInternetGatewayId());
+        List<EgressOnlyInternetGateway> afterDelete = service.describeEgressOnlyInternetGateways(
+                region, List.of(eigw.getEgressOnlyInternetGatewayId()), Map.of());
+        assertTrue(afterDelete.isEmpty());
+
+        // Delete unknown EIGW throws InvalidGatewayID.NotFound
+        assertEquals("InvalidGatewayID.NotFound", assertThrows(AwsException.class,
+                () -> service.deleteEgressOnlyInternetGateway(region, "eigw-unknown")).getErrorCode());
+
+        service.deleteEgressOnlyInternetGateway(region, replayed.getEgressOnlyInternetGatewayId());
+        service.deleteVpc(region, vpc.getVpcId());
+    }
+
+    @Test
+    void createEgressOnlyInternetGatewayWithMissingVpcThrowsNotFound() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        assertEquals("InvalidVpcID.NotFound", assertThrows(AwsException.class,
+                () -> service.createEgressOnlyInternetGateway("us-east-1", "vpc-unknown", null, List.of()))
+                .getErrorCode());
     }
 }
