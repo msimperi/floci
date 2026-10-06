@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -154,8 +155,12 @@ public class Ec2QueryHandler {
                 case "ReplaceTransitGatewayRoute" -> handleReplaceTransitGatewayRoute(params, region);
                 case "SearchTransitGatewayRoutes" -> handleSearchTransitGatewayRoutes(params, region);
                 case "ExportTransitGatewayRoutes" -> handleExportTransitGatewayRoutes(params, region);
+                case "CreateEgressOnlyInternetGateway" ->
+                        handleCreateEgressOnlyInternetGateway(params, region);
                 case "DescribeEgressOnlyInternetGateways" ->
-                        handleDescribeEgressOnlyInternetGateways(params);
+                        handleDescribeEgressOnlyInternetGateways(params, region);
+                case "DeleteEgressOnlyInternetGateway" ->
+                        handleDeleteEgressOnlyInternetGateway(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -2867,11 +2872,72 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p) {
+    private Response handleCreateEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        String vpcId = p.getFirst("VpcId");
+        if (vpcId == null || vpcId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VpcId", 400);
+        }
+        String clientToken = p.getFirst("ClientToken");
+        List<Tag> initialTags = parseTagsForResource(p, "egress-only-internet-gateway");
+        EgressOnlyInternetGateway eigw = service.createEgressOnlyInternetGateway(region, vpcId, clientToken, initialTags);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        if (eigw.getClientToken() != null && !eigw.getClientToken().isBlank()) {
+            xml.elem("clientToken", eigw.getClientToken());
+        }
+        xml.start("egressOnlyInternetGateway")
+                .raw(eigwXml(eigw))
+                .end("egressOnlyInternetGateway")
+                .end("CreateEgressOnlyInternetGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeEgressOnlyInternetGateways(MultivaluedMap<String, String> p, String region) {
         validateEmptyDiscoveryPagination(p, 255);
-        service.describeEgressOnlyInternetGatewayIds(getFilters(p));
-        return emptyDescribeResponse(
-                "DescribeEgressOnlyInternetGateways", "egressOnlyInternetGatewaySet");
+        List<String> ids = getListOrSingle(p, "EgressOnlyInternetGatewayId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<EgressOnlyInternetGateway> gateways = service.describeEgressOnlyInternetGateways(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeEgressOnlyInternetGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("egressOnlyInternetGatewaySet");
+        for (EgressOnlyInternetGateway eigw : gateways) {
+            xml.start("item").raw(eigwXml(eigw)).end("item");
+        }
+        xml.end("egressOnlyInternetGatewaySet").end("DescribeEgressOnlyInternetGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteEgressOnlyInternetGateway(MultivaluedMap<String, String> p, String region) {
+        String id = p.getFirst("EgressOnlyInternetGatewayId");
+        if (id == null || id.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter EgressOnlyInternetGatewayId", 400);
+        }
+        service.deleteEgressOnlyInternetGateway(region, id);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteEgressOnlyInternetGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("returnCode", "true")
+                .end("DeleteEgressOnlyInternetGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String eigwXml(EgressOnlyInternetGateway eigw) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("egressOnlyInternetGatewayId", eigw.getEgressOnlyInternetGatewayId())
+                .start("attachmentSet");
+        for (InternetGatewayAttachment att : eigw.getAttachments()) {
+            xml.start("item")
+                    .elem("vpcId", att.getVpcId())
+                    .elem("state", att.getState())
+                    .end("item");
+        }
+        xml.end("attachmentSet")
+                .raw(tagSetXml(eigw.getTags()));
+        return xml.build();
     }
 
     private void validateEmptyDiscoveryPagination(MultivaluedMap<String, String> p, int maximum) {
