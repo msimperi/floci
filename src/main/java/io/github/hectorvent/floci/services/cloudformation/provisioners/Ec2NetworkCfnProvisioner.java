@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.EgressOnlyInternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -52,6 +53,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String SUBNET = "AWS::EC2::Subnet";
     private static final String INTERNET_GATEWAY = "AWS::EC2::InternetGateway";
+    private static final String EGRESS_ONLY_INTERNET_GATEWAY = "AWS::EC2::EgressOnlyInternetGateway";
     private static final String ROUTE_TABLE = "AWS::EC2::RouteTable";
     private static final String ROUTE = "AWS::EC2::Route";
     private static final String NAT_GATEWAY = "AWS::EC2::NatGateway";
@@ -76,7 +78,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(SUBNET, INTERNET_GATEWAY, ROUTE_TABLE, ROUTE, NAT_GATEWAY, EIP, SUBNET_ROUTE_TABLE_ASSOCIATION);
+        return Set.of(SUBNET, INTERNET_GATEWAY, EGRESS_ONLY_INTERNET_GATEWAY, ROUTE_TABLE, ROUTE, NAT_GATEWAY, EIP, SUBNET_ROUTE_TABLE_ASSOCIATION);
     }
 
     @Override
@@ -85,6 +87,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         switch (r.getResourceType()) {
             case SUBNET -> provisionSubnet(r, props, ctx);
             case INTERNET_GATEWAY -> provisionInternetGateway(r, props, ctx);
+            case EGRESS_ONLY_INTERNET_GATEWAY -> provisionEgressOnlyInternetGateway(r, props, ctx);
             case ROUTE_TABLE -> provisionRouteTable(r, props, ctx);
             case ROUTE -> provisionRoute(r, props, ctx);
             case NAT_GATEWAY -> provisionNatGateway(r, props, ctx);
@@ -229,6 +232,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                     () -> ec2Service.deleteSubnet(region, physicalId), "InvalidSubnetID.NotFound");
             case INTERNET_GATEWAY -> CfnDeletes.safeDelete("internet gateway", physicalId,
                     () -> ec2Service.deleteInternetGateway(region, physicalId), "InvalidInternetGatewayID.NotFound");
+            case EGRESS_ONLY_INTERNET_GATEWAY -> CfnDeletes.safeDelete("egress-only internet gateway", physicalId,
+                    () -> ec2Service.deleteEgressOnlyInternetGateway(region, physicalId), "InvalidGatewayID.NotFound");
             case ROUTE_TABLE -> CfnDeletes.safeDelete("route table", physicalId,
                     () -> ec2Service.deleteRouteTable(region, physicalId), "InvalidRouteTableID.NotFound");
             case ROUTE -> deleteRoute(physicalId, region);
@@ -317,6 +322,11 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     private InternetGateway findInternetGateway(String igwId, String region) {
         return tolerateNotFound(() -> ec2Service.describeInternetGateways(region, List.of(igwId), Map.of()).stream()
                 .findFirst().orElse(null), "InvalidInternetGatewayID.NotFound", igwId);
+    }
+
+    private EgressOnlyInternetGateway findEgressOnlyInternetGateway(String eigwId, String region) {
+        return tolerateNotFound(() -> ec2Service.describeEgressOnlyInternetGateways(region, List.of(eigwId), Map.of()).stream()
+                .findFirst().orElse(null), "InvalidGatewayID.NotFound", eigwId);
     }
 
     private RouteTable findRouteTable(String routeTableId, String region) {
@@ -489,6 +499,24 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
         guarded(r, ctx, existing == null, () -> ec2Service.deleteInternetGateway(ctx.region(), igw.getInternetGatewayId()),
                 () -> applyTags(r, existing != null, igw.getInternetGatewayId(), existing != null ? existing.getTags() : List.of(), props, ctx));
+    }
+
+    private void provisionEgressOnlyInternetGateway(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String vpcId = ctx.resolveOptional(props, "VpcId");
+        require(EGRESS_ONLY_INTERNET_GATEWAY, "VpcId", vpcId);
+        // VpcId is createOnly: the same VPC keeps the gateway, a different VPC replaces it.
+        EgressOnlyInternetGateway existing = ctx.isUpdate()
+                ? findEgressOnlyInternetGateway(ctx.priorPhysicalId(), ctx.region()) : null;
+        boolean reuse = existing != null && existing.getAttachments().stream()
+                .anyMatch(att -> Objects.equals(vpcId, att.getVpcId()));
+        EgressOnlyInternetGateway eigw = reuse ? existing
+                : ec2Service.createEgressOnlyInternetGateway(ctx.region(), vpcId, null, List.of());
+        r.setPhysicalId(eigw.getEgressOnlyInternetGatewayId());
+        r.getAttributes().put("Id", eigw.getEgressOnlyInternetGatewayId());
+        guarded(r, ctx, !reuse,
+                () -> ec2Service.deleteEgressOnlyInternetGateway(ctx.region(), eigw.getEgressOnlyInternetGatewayId()),
+                () -> applyTags(r, reuse, eigw.getEgressOnlyInternetGatewayId(),
+                        reuse ? existing.getTags() : List.of(), props, ctx));
     }
 
     private void provisionRouteTable(StackResource r, JsonNode props, ProvisionContext ctx) {
